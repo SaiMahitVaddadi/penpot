@@ -1817,8 +1817,6 @@ test("User disables the current set but token still have resolved values shown i
 });
 
 test.describe("User can't create groups that clash with token names", () => {
-  const unknownError = "Unknown error";
-
   const changeSetInput = async (sidebar, setName, finalKey = "Enter") => {
     const setInput = sidebar.locator("input:focus");
     await expect(setInput).toBeVisible();
@@ -1859,7 +1857,7 @@ test.describe("User can't create groups that clash with token names", () => {
 
     // Check that the value has an error
     const errorNode =
-      tokensUpdateCreateModal.getByText(unknownError);
+      tokensUpdateCreateModal.getByText(`Group name of ${name} conflicts with a token of the same name in another active set.`);
 
     await expect(errorNode).toBeVisible();
 
@@ -2036,7 +2034,7 @@ test("User can't create Text Decoration token with group name that clashes with 
 
     await createSet(tokenThemesSetsSidebar, "Second set");
 
-    await createBadToken(page, "Text Decoration", "td1.bad", "Value", "underline");
+    await createBadToken(page, "Text Decoration", "dec1.bad", "Value", "strike-through");
   });
 
   test("User can't create Typography token with group name that clashes with existing token", async ({ page }) => {
@@ -2102,7 +2100,7 @@ test("User can't create Text Decoration token with group name that clashes with 
       name: "Save",
     });
 
-    const errorNode = tokensUpdateCreateModal.getByText(unknownError);
+    const errorNode = tokensUpdateCreateModal.getByText("Group name of typ1.bad conflicts with a token of the same name in another active set.");
     await expect(errorNode).toHaveCount(6);
     await expect(submitButton).toBeDisabled();
   });
@@ -2160,8 +2158,8 @@ test("User can't create Text Decoration token with group name that clashes with 
       name: "Save",
     });
 
-    const errorNode = tokensUpdateCreateModal.getByText(unknownError);
-    await expect(errorNode).toHaveCount(4);
+    const errorNode = tokensUpdateCreateModal.getByText("Group name of sha1.bad conflicts with a token of the same name in another active set.");
+    await expect(errorNode).toHaveCount(5);
     await expect(submitButton).toBeDisabled();
   });
 });
