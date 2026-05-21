@@ -176,56 +176,6 @@
 ;; RESTORE VERSION EVENTS
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(defn- restore-version
-  [id]
-  (assert (uuid? id) "expected valid uuid for `id`")
-  (ptk/reify ::restore-version
-    ptk/WatchEvent
-    (watch [_ state _]
-      (let [file-id (:current-file-id state)]
-        (rx/concat
-         (rx/of ::dwp/force-persist
-                (dw/remove-layout-flag :document-history))
-
-         (->> (wait-for-persistence file-id id)
-              (rx/map #(initialize-version))))))))
-
-(defn enter-restore
-  [id]
-  (assert (uuid? id) "expected valid uuid for `id`")
-  (ptk/reify ::enter-restore
-    ptk/WatchEvent
-    (watch [_ _ _]
-      (let [output-s (rx/subject)]
-        (rx/merge
-         output-s
-         (rx/of (ntf/dialog
-                 :content (tr "workspace.versions.restore-warning")
-                 :controls :inline-actions
-                 :cancel {:label (tr "workspace.updates.dismiss")
-                          :callback #(do
-                                       (rx/push! output-s (ntf/hide :tag :restore-dialog))
-                                       (rx/end! output-s))}
-                 :accept {:label (tr "labels.restore")
-                          :callback #(do
-                                       (rx/push! output-s (restore-version id))
-                                       (rx/end! output-s))}
-                 :tag :restore-dialog)))))))
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; PREVIEW VERSION EVENTS
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-
-(defn- apply-snapshot
-  "Swap the file data in app state with the provided snapshot-file
-  response. Used by the version preview feature to show historical
-  file content without modifying the database"
-  [{:keys [id] :as snapshot}]
-  (ptk/reify ::apply-snapshot-data
-    ptk/UpdateEvent
-    (update [_ state]
-      (update state :files assoc id snapshot))))
-
 (defn exit-preview
   "Exit from preview mode and reload the live file data"
   []
@@ -244,6 +194,59 @@
             page-id (:current-page-id state)]
 
         (rx/of (dwpg/initialize-page file-id page-id))))))
+
+(defn- restore-version
+  [id]
+  (assert (uuid? id) "expected valid uuid for `id`")
+  (ptk/reify ::restore-version
+    ptk/WatchEvent
+    (watch [_ state _]
+      (let [file-id (:current-file-id state)]
+        (rx/concat
+         (rx/of ::dwp/force-persist
+                (dw/remove-layout-flag :document-history))
+
+         (->> (wait-for-persistence file-id id)
+              (rx/map #(initialize-version))))))))
+
+(defn enter-restore
+  [id {:keys [from-preview?]}]
+  (assert (uuid? id) "expected valid uuid for `id`")
+  (ptk/reify ::enter-restore
+    ptk/WatchEvent
+    (watch [_ _ _]
+      (let [output-s (rx/subject)]
+        (rx/merge
+         output-s
+         (rx/of (ntf/dialog
+                 :content (tr "workspace.versions.restore-warning")
+                 :controls :inline-actions
+                 :cancel {:label (tr "workspace.updates.dismiss")
+                          :callback #(do
+                                       (rx/push! output-s (ntf/hide :tag :restore-dialog))
+                                       (rx/push! output-s (exit-preview))
+                                       (rx/end! output-s))}
+                 :accept {:label (tr "labels.restore")
+                          :callback #(do
+                                       (rx/push! output-s (restore-version id))
+                                       (when from-preview?
+                                         (rx/push! output-s (exit-preview)))
+                                       (rx/end! output-s))}
+                 :tag :restore-dialog)))))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; PREVIEW VERSION EVENTS
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(defn- apply-snapshot
+  "Swap the file data in app state with the provided snapshot-file
+  response. Used by the version preview feature to show historical
+  file content without modifying the database"
+  [{:keys [id] :as snapshot}]
+  (ptk/reify ::apply-snapshot-data
+    ptk/UpdateEvent
+    (update [_ state]
+      (update state :files assoc id snapshot))))
 
 (defn enter-preview
   "Load a snapshot into the workspace for read-only preview without
@@ -285,7 +288,7 @@
                  :accept {:label (tr "labels.restore")
                           :callback #(do
                                        (rx/push! output-s (ntf/hide))
-                                       (rx/push! output-s (restore-version id))
+                                       (rx/push! output-s (enter-restore id {:from-preview? true}))
                                        (rx/end! output-s))}
                  :tag :preview-dialog))
 

@@ -361,7 +361,7 @@
         on-restore-version
         (mf/use-fn
          (fn [id _event]
-           (st/emit! (dwv/enter-restore id)
+           (st/emit! (dwv/enter-restore id {:from-preview? false})
                      (ev/event {::ev/name "restore-version"
                                 ::ev/origin "workspace:sidebar"
                                 :type "pinned-version"}))))
@@ -369,7 +369,7 @@
         on-restore-snapshot
         (mf/use-fn
          (fn [id _event]
-           (st/emit! (dwv/enter-restore id)
+           (st/emit! (dwv/enter-restore id {:from-preview? false})
                      (ev/event {::ev/name "restore-version"
                                 ::ev/origin "workspace:sidebar"
                                 :type "autosaved-version"}))))
