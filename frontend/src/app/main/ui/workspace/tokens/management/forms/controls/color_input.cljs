@@ -312,7 +312,8 @@
                    (-> state
                        (assoc-in [:data :value value-subfield index field] (if trim? (str/trim value) value))
                        (update :errors clean-errors)
-                       (update :extra-errors clean-errors)))))))
+                       (update :extra-errors clean-errors)
+                       (update :extra-errors dissoc "")))))))
 
 (mf/defc indexed-color-input*
   [{:keys [name tokens token index value-subfield] :rest props}]

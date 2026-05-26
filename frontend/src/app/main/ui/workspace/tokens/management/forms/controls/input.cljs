@@ -274,7 +274,8 @@
                        (assoc-in [:data :value field] (if trim? (str/trim value) value))
                        (assoc-in [:touched :value field] true)
                        (update :errors clean-errors)
-                       (update :extra-errors clean-errors)))))))
+                       (update :extra-errors clean-errors)
+                       (update :extra-errors dissoc "")))))))
 
 (mf/defc input-composite*
   [{:keys [name tokens token] :rest props}]
@@ -386,7 +387,8 @@
                    (-> state
                        (assoc-in [:data :value value-subfield index field] (if trim? (str/trim value) value))
                        (update :errors clean-errors)
-                       (update :extra-errors clean-errors)))))))
+                       (update :extra-errors clean-errors)
+                       (update :extra-errors dissoc "")))))))
 
 (mf/defc input-indexed*
   [{:keys [name tokens token index value-subfield] :rest props}]

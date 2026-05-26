@@ -24,6 +24,7 @@
    [app.main.ui.ds.buttons.button :refer [button*]]
    [app.main.ui.ds.foundations.assets.icon :as i]
    [app.main.ui.ds.foundations.typography.heading :refer [heading*]]
+   [app.main.ui.ds.notifications.context-notification :refer [context-notification*]]
    [app.main.ui.forms :as fc]
    [app.main.ui.workspace.tokens.management.forms.controls :as token.controls]
    [app.main.ui.workspace.tokens.management.forms.validators :refer [default-validate-token]]
@@ -56,6 +57,7 @@
            action
            is-create
            selected-token-set-id
+           initial-errors
            tokens-tree-in-selected-set
            token-type
            make-schema
@@ -112,9 +114,15 @@
                :value (:value token "")
                :description (:description token "")}))
 
+        initial-general-errors (mf/with-memo [token initial initial-errors]
+                                 (when initial-errors
+                                   {"" {:message (wte/resolve-error-message (first initial-errors))}}))
         form
         (fm/use-form :schema schema
+                     :initial-errors initial-general-errors
                      :initial initial)
+
+        general-errors (get-in @form [:extra-errors ""])
 
         on-toggle-tab
         (mf/use-fn
@@ -288,6 +296,10 @@
                             :max-length max-input-length
                             :variant "comfortable"
                             :is-optional true}]]
+       (when (some? general-errors)
+         [:> context-notification* {:level :warning
+                                    :appearance :ghost}
+          (:message general-errors)])
 
        [:div {:class (stl/css-case :button-row true
                                    :with-delete (= action "edit"))}

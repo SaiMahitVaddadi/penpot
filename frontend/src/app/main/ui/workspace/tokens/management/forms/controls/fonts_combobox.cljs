@@ -205,7 +205,8 @@
                    (-> state
                        (assoc-in [:data :value field] (if trim? (str/trim value) value))
                        (update :errors clean-errors)
-                       (update :extra-errors clean-errors)))))))
+                       (update :extra-errors clean-errors)
+                       (update :extra-errors dissoc "")))))))
 
 (mf/defc composite-fonts-combobox*
   [{:keys [token tokens name] :rest props}]

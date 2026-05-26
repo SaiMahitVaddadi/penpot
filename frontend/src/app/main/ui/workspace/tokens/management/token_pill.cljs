@@ -16,6 +16,7 @@
    [app.config :as cf]
    [app.main.data.workspace.tokens.application :as dwta]
    [app.main.data.workspace.tokens.color :as dwtc]
+   [app.main.data.workspace.tokens.errors :as wte]
    [app.main.data.workspace.tokens.format :as dwtf]
    [app.main.refs :as refs]
    [app.main.ui.ds.foundations.assets.icon :refer [icon*] :as i]
@@ -101,7 +102,7 @@
 
 (defn- generate-tooltip
   "Generates a tooltip for a given token"
-  [is-viewer shape theme-token token half-applied no-valid-value ref-not-in-active-set]
+  [is-viewer shape theme-token token half-applied no-valid-value ref-not-in-active-set is-name-collision errors]
   (let [{:keys [name type resolved-value value]} token
         resolved-value-theme (:resolved-value theme-token)
         resolved-value (or resolved-value-theme resolved-value)
@@ -127,6 +128,9 @@
       ;; If there are errors, show the appropriate message
       ref-not-in-active-set
       (tr "workspace.tokens.ref-not-valid")
+
+      is-name-collision
+      (wte/resolve-error-message (first errors))
 
       no-valid-value
       (tr "workspace.tokens.value-not-valid")
@@ -177,7 +181,6 @@
   {::mf/wrap [mf/memo]}
   [{:keys [on-click token on-context-menu selected-shapes is-selected-inside-layout active-theme-tokens active-theme-tokens-not-forced]}]
   (let [{:keys [name value type]} token
-
         resolved-token (get active-theme-tokens (:name token))
         errors         (:errors resolved-token)
 
@@ -217,12 +220,17 @@
           (seq (:errors resolved-token))
           (and is-reference?
                (not (contains-reference-value? value active-theme-tokens-not-forced))))
+        name-collision (->> errors
+                            (first)
+                            (:error/code)
+                            (= :error.token/name-collision))
 
         no-valid-value (seq errors)
 
         errors?
         (or ref-not-in-active-set
-            no-valid-value)
+            no-valid-value
+            name-collision)
 
         color
         (when (cfo/color-token? token)
@@ -266,12 +274,12 @@
 
         on-hover
         (mf/use-fn
-         (mf/deps selected-shapes is-viewer? active-theme-tokens token half-applied? no-valid-value ref-not-in-active-set)
+         (mf/deps selected-shapes is-viewer? active-theme-tokens token half-applied? no-valid-value ref-not-in-active-set name-collision errors)
          (fn [event]
            (let [node  (dom/get-current-target event)
                  theme-token (get active-theme-tokens name)
                  title (generate-tooltip is-viewer? (first selected-shapes) theme-token token
-                                         half-applied? no-valid-value ref-not-in-active-set)]
+                                         half-applied? no-valid-value ref-not-in-active-set name-collision errors)]
              (dom/set-attribute! node "title" title))))]
 
     [:button {:class (stl/css-case
