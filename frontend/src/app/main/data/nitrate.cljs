@@ -308,6 +308,7 @@
                                               :orgs-allowed orgs-allowed
                                               :current-organization-id (dm/get-in team [:organization :id])
                                               :on-confirm on-confirm
+                                              :team-id team-id
                                               :title-key "dashboard.select-org-modal.title"
                                               :choose-key "dashboard.select-org-modal.choose"
                                               :placeholder-key "dashboard.select-org-modal.select"
@@ -344,9 +345,8 @@
                                (if (empty? valid-orgs)
                                  (modal/show
                                   {:type :alert
+                                   :hide-actions? true
                                    :message (tr "dashboard.team-organization.add.no-valid-orgs")
-                                   :accept-label (tr "labels.accept")
-                                   :accept-style :primary
                                    :title (tr "dashboard.select-org-modal.title")})
                                  (show-select-modal orgs-allowed))))))))))))))))
 
@@ -397,6 +397,7 @@
                                          (merge {:organizations           selectable-orgs
                                                  :current-organization-id current-org-id
                                                  :on-confirm              on-confirm
+                                                 :team-id                 team-id
                                                  :title-key               "dashboard.change-org-modal.title"
                                                  :choose-key              "dashboard.change-org-modal.choose"
                                                  :placeholder-key         "dashboard.change-org-modal.select"

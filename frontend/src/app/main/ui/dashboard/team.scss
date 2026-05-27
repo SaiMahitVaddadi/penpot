@@ -935,7 +935,7 @@
 }
 
 .modal-select-org-content {
-  @include t.use-typography("body-large");
+  @include t.use-typography("body-medium");
 
   color: var(--color-foreground-secondary);
   overflow: auto;
@@ -958,9 +958,13 @@
 }
 
 .modal-select-org-text {
-  @include t.use-typography("body-large");
+  @include t.use-typography("body-medium");
 
   color: var(--color-foreground-secondary);
+}
+
+.external-invitations-warning {
+  margin-block: var(--sp-xxxl) var(--sp-s);
 }
 
 // ORGANIZATIONS SETTINGS
