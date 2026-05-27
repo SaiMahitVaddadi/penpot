@@ -131,6 +131,7 @@ impl TileRect {
         self.y() + self.half_height()
     }
 
+    #[inline(always)]
     pub fn contains(&self, tile: &Tile) -> bool {
         tile.x() >= self.left()
             && tile.y() >= self.top()

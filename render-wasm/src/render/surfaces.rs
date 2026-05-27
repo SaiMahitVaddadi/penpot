@@ -1276,18 +1276,11 @@ impl Surfaces {
     pub fn draw_cached_tile_into_backbuffer(
         &mut self,
         tile: Tile,
-        rect: skia::Rect,
-        _color: skia::Color,
+        rect: &Rect,
     ) {
         if let Some(image) = self.get_tile_image_from_tile_atlas(tile) {
+            // let rect = tile.get_rect_with_offset(&offset);
             let backbuffer_canvas = self.backbuffer.canvas();
-
-            // if color != skia::Color::TRANSPARENT {
-            //     let mut paint = skia::Paint::default();
-            //     paint.set_color(color);
-            //     backbuffer_canvas.draw_rect(rect, &paint);
-            // }
-
             backbuffer_canvas.draw_image_rect(&image, None, rect, &skia::Paint::default());
         }
     }

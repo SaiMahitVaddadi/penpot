@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::error::{Error, Result};
 use crate::math::{self as math, Bounds, Matrix, Point, Vector, VectorExt};
 use crate::shapes::{
@@ -120,7 +118,7 @@ struct ChildAxis {
     max_across_size: f32,
     is_fill_main: bool,
     is_fill_across: bool,
-    z_index: i32,
+    _z_index: i32, // unused
     bounds: Bounds,
 }
 
@@ -143,7 +141,7 @@ impl ChildAxis {
                 max_across_size: layout_item.and_then(|i| i.max_h).unwrap_or(MAX_SIZE),
                 is_fill_main: child.is_layout_horizontal_fill(),
                 is_fill_across: child.is_layout_vertical_fill(),
-                z_index: layout_item.and_then(|i| i.z_index).unwrap_or(0),
+                _z_index: layout_item.and_then(|i| i.z_index).unwrap_or(0),
                 bounds: *child_bounds,
             }
         } else {
@@ -161,7 +159,7 @@ impl ChildAxis {
                 max_main_size: layout_item.and_then(|i| i.max_h).unwrap_or(MAX_SIZE),
                 is_fill_main: child.is_layout_vertical_fill(),
                 is_fill_across: child.is_layout_horizontal_fill(),
-                z_index: layout_item.and_then(|i| i.z_index).unwrap_or(0),
+                _z_index: layout_item.and_then(|i| i.z_index).unwrap_or(0),
                 bounds: *child_bounds,
             }
         };

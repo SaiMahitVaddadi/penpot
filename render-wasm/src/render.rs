@@ -895,17 +895,7 @@ impl RenderState {
         self.flush_and_submit();
     }
 
-    #[allow(dead_code)]
-    pub fn get_canvas_at(&mut self, surface_id: SurfaceId) -> &skia::Canvas {
-        self.surfaces.canvas(surface_id)
-    }
-
-    #[allow(dead_code)]
-    pub fn restore_canvas(&mut self, surface_id: SurfaceId) {
-        self.surfaces.canvas(surface_id).restore();
-    }
-
-    pub fn apply_render_to_final_canvas(&mut self, rect: skia::Rect) -> Result<()> {
+    pub fn apply_render_to_final_canvas(&mut self) -> Result<()> {
         // During interactive transforms we render tiles directly into Target; updating the cache
         // (snapshot -> atlas blit -> tiles.add) can force GPU stalls. Defer cache rebuild until
         // the interaction ends.
@@ -944,8 +934,9 @@ impl RenderState {
             self.render_area,
         );
 
+        let rect = self.get_current_tile_bounds()?;
         self.surfaces
-            .draw_cached_tile_into_backbuffer(current_tile, rect, self.background_color);
+            .draw_cached_tile_into_backbuffer(current_tile, &rect);
 
         Ok(())
     }
@@ -1938,8 +1929,11 @@ impl RenderState {
                     0.0
                 };
 
-                let cx0 = (0.0 * inv) - translate_x;
-                let cy0 = (0.0 * inv) - translate_y;
+                // let cx0 = (0.0 * inv) - translate_x;
+                // let cy0 = (0.0 * inv) - translate_y;
+                // NOTA: 0.0 * inv => siempre 0
+                let cx0 = -translate_x;
+                let cy0 = -translate_y;
                 let cx1 = (vw * inv) - translate_x;
                 let cy1 = (vh * inv) - translate_y;
 
@@ -1964,20 +1958,8 @@ impl RenderState {
                 }
             }
 
-            // Setup canvas transform
-            {
-                let canvas = self.surfaces.canvas(SurfaceId::Backbuffer);
-                canvas.save();
-                canvas.scale((navigate_zoom, navigate_zoom));
-                canvas.translate((translate_x, translate_y));
-                canvas.clear(bg_color);
-            }
-
             // Draw directly from cache surface, avoiding snapshot overhead
             self.surfaces.draw_cache_to_backbuffer();
-
-            // Restore canvas state
-            self.surfaces.canvas(SurfaceId::Backbuffer).restore();
 
             // During pure pan (same zoom), draw tiles from the HashMap
             // on top of the scaled Cache surface.  Cached tile textures
@@ -1993,9 +1975,9 @@ impl RenderState {
                     for ty in visible_rect.y1()..=visible_rect.y2() {
                         let tile = tiles::Tile::from(tx, ty);
                         if self.surfaces.has_cached_tile_surface(tile) {
-                            let tile_rect = tile.get_rect_with_offset(&offset);
+                            let rect = tile.get_rect_with_offset(&offset);
                             self.surfaces
-                                .draw_cached_tile_into_backbuffer(tile, tile_rect, bg_color);
+                                .draw_cached_tile_into_backbuffer(tile, &rect);
                         }
                     }
                 }
@@ -2034,7 +2016,9 @@ impl RenderState {
         Ok(())
     }
 
-    fn gc(&mut self, tree: ShapesPoolRef) {
+    /// Clears all the necessary vecs and hashmaps.
+    /// Also garbage collects surfaces.
+    fn clear(&mut self, tree: ShapesPoolRef) {
         #[cfg(feature = "stats")]
         self.stats.clear();
 
@@ -2063,7 +2047,7 @@ impl RenderState {
         timestamp: i32,
         sync_render: bool,
     ) -> Result<FrameType> {
-        self.gc(tree);
+        self.clear(tree);
 
         let _start = performance::begin_timed_log!("start_render_loop");
         let scale = self.get_scale();
@@ -2527,18 +2511,11 @@ impl RenderState {
     }
 
     pub fn get_current_tile_bounds(&mut self) -> Result<Rect> {
-        let tiles::Tile(tile_x, tile_y) = self
+        let tile = self
             .current_tile
             .ok_or(Error::CriticalError("Current tile not found".to_string()))?;
-        let scale = self.get_scale();
-        let offset_x = self.viewbox.area.left * scale;
-        let offset_y = self.viewbox.area.top * scale;
-        Ok(Rect::from_xywh(
-            (tile_x as f32 * tiles::TILE_SIZE) - offset_x,
-            (tile_y as f32 * tiles::TILE_SIZE) - offset_y,
-            tiles::TILE_SIZE,
-            tiles::TILE_SIZE,
-        ))
+        let offset = self.viewbox.get_offset();
+        Ok(tile.get_rect_with_offset(&offset))
     }
 
     pub fn get_rect_bounds(&mut self, rect: skia::Rect) -> Rect {
@@ -3398,7 +3375,7 @@ impl RenderState {
                                 surfaces::DrawOnCache::Yes,
                             );
                         } else {
-                            self.apply_render_to_final_canvas(tile_rect)?;
+                            self.apply_render_to_final_canvas()?;
                         }
 
                         if self.options.is_debug_visible() {

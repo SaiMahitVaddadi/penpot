@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use super::{tiles, RenderState, SurfaceId};
 
 #[cfg(target_arch = "wasm32")]
@@ -22,7 +23,6 @@ fn get_debug_rect(rect: Rect) -> Rect {
     )
 }
 
-#[allow(dead_code)]
 fn render_debug_view(render_state: &mut RenderState) {
     let mut paint = skia::Paint::default();
     paint.set_style(skia::PaintStyle::Stroke);
@@ -36,7 +36,6 @@ fn render_debug_view(render_state: &mut RenderState) {
         .draw_rect(rect, &paint);
 }
 
-#[allow(dead_code)]
 pub fn render_debug_cache_surface(render_state: &mut RenderState) {
     let canvas = render_state.surfaces.canvas(SurfaceId::Debug);
     canvas.save();
@@ -78,7 +77,6 @@ pub fn render_wasm_label(render_state: &mut RenderState) {
     }
 }
 
-#[allow(dead_code)]
 pub fn render_debug_tiles_for_viewbox(render_state: &mut RenderState) {
     let tiles::TileRect(sx, sy, ex, ey) = render_state.tile_viewbox.interest_rect;
     let canvas = render_state.surfaces.canvas(SurfaceId::Debug);
@@ -91,7 +89,6 @@ pub fn render_debug_tiles_for_viewbox(render_state: &mut RenderState) {
 }
 
 // Renders the tiles in the viewbox
-#[allow(dead_code)]
 pub fn render_debug_viewbox_tiles(render_state: &mut RenderState) {
     let scale = render_state.get_scale();
     let canvas = render_state.surfaces.canvas(SurfaceId::Debug);
@@ -187,13 +184,11 @@ pub fn render_debug_shape(
     }
 }
 
-#[allow(dead_code)]
 #[cfg(target_arch = "wasm32")]
 pub fn trap() {
     run_script!("debugger");
 }
 
-#[allow(dead_code)]
 #[cfg(target_arch = "wasm32")]
 #[derive(Debug, PartialEq)]
 pub enum SurfaceBackendKind {
@@ -203,7 +198,6 @@ pub enum SurfaceBackendKind {
     Unknown,
 }
 
-#[allow(dead_code)]
 #[cfg(target_arch = "wasm32")]
 pub fn classify_surface_backend(surface: &mut skia::Surface) -> SurfaceBackendKind {
     if skia::gpu::surfaces::get_backend_texture(
@@ -231,7 +225,6 @@ pub fn classify_surface_backend(surface: &mut skia::Surface) -> SurfaceBackendKi
     SurfaceBackendKind::Unknown
 }
 
-#[allow(dead_code)]
 #[cfg(target_arch = "wasm32")]
 pub fn console_debug_surface(render_state: &mut RenderState, id: SurfaceId) {
     let base64_image = render_state
@@ -242,7 +235,6 @@ pub fn console_debug_surface(render_state: &mut RenderState, id: SurfaceId) {
     run_script!(format!("console.log('%c ', 'font-size: 1px; background: url(data:image/png;base64,{base64_image}) no-repeat; padding: 100px; background-size: contain;')"));
 }
 
-#[allow(dead_code)]
 #[cfg(target_arch = "wasm32")]
 pub fn console_debug_surface_base64(render_state: &mut RenderState, id: SurfaceId) {
     let base64_image = render_state
@@ -253,7 +245,6 @@ pub fn console_debug_surface_base64(render_state: &mut RenderState, id: SurfaceI
     println!("{}", base64_image);
 }
 
-#[allow(dead_code)]
 #[cfg(target_arch = "wasm32")]
 pub fn console_debug_surface_rect(render_state: &mut RenderState, id: SurfaceId, rect: skia::Rect) {
     let int_rect = skia::IRect::from_ltrb(

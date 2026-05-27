@@ -465,7 +465,6 @@ pub fn propagate_modifiers(
         layout_reflows = HashSet::new();
     }
 
-    // #[allow(dead_code)]
     Ok(modifiers
         .iter()
         .map(|(key, val)| TransformEntry::from_input(*key, *val))
