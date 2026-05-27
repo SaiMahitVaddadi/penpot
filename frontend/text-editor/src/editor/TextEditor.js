@@ -447,16 +447,17 @@ export class TextEditor extends EventTarget {
     if ((e.ctrlKey || e.metaKey) && e.key === "a") {
       e.preventDefault();
       this.selectAll();
-      return;
-    }
-
-    if ((e.ctrlKey || e.metaKey) && e.key === "Backspace") {
+    } else if ((e.ctrlKey || e.metaKey) && e.key === "Backspace") {
       e.preventDefault();
       if (this.#selectionController.isCollapsed) {
         this.#selectionController.removeWordBackward();
       } else {
         this.#selectionController.removeSelected();
       }
+      this.#notifyLayout(LayoutType.FULL);
+    } else if (e.shiftKey && e.key === "Enter") {
+      e.preventDefault();
+      this.#selectionController.insertParagraph();
       this.#notifyLayout(LayoutType.FULL);
     }
   };
