@@ -76,9 +76,10 @@ impl TileRect {
         self.1
     }
 
+    /// Inclusive tile count on X (matches `contains`: both `x1` and `x2` are included).
     #[inline]
     pub fn width(&self) -> i32 {
-        self.x2() - self.x1()
+        self.x2() - self.x1() + 1
     }
 
     #[inline]
@@ -86,9 +87,10 @@ impl TileRect {
         self.width() / 2
     }
 
+    /// Inclusive tile count on Y (matches `contains`: both `y1` and `y2` are included).
     #[inline]
     pub fn height(&self) -> i32 {
-        self.y2() - self.y1()
+        self.y2() - self.y1() + 1
     }
 
     #[inline]
