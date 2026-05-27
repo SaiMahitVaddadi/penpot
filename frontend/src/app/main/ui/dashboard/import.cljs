@@ -496,6 +496,23 @@
                 [:div (:name entry)]
                 (when-let [err (:error entry)]
                   [:div {:class (stl/css :import-error-detail)}
+                   ;; Temporary frontend-side error translations to provide more meaningful
+                   ;; messages until backend error handling is improved and standardized.
+                   ;; These mappings are only a short-term workaround and should be removed
+                   ;; once the error handling enhancement is implemented.
+                   ;; https://github.com/penpot/penpot/issues/9884
+                   (case err
+                     "check error"
+                     (tr "dashboard.import.import-error.check-error")
+
+                     "Cannot read properties of undefined (reading 'getData')"
+                     (tr "dashboard.import.import-error.cannot-read-properties")
+
+                     "the penpot file seems corrupt, missing underlying zip entry"
+                     (tr "dashboard.import.import-error.corrupt-file")
+
+                     :else
+                     (tr "dashboard.import.import-error.unknown-error" err))
                    (tr err)])]))]
           [:div (tr "dashboard.import.import-error.message2")]]
 
