@@ -56,6 +56,7 @@
 - Preserve Inkscape labels when pasting SVGs (by @jeffrey701) [#7869](https://github.com/penpot/penpot/issues/7869) (PR: [#9252](https://github.com/penpot/penpot/pull/9252))
 - Add Alt+click to expand layer subtree (by @MilosM348) [#7736](https://github.com/penpot/penpot/issues/7736) (PR: [#9179](https://github.com/penpot/penpot/pull/9179))
 - Allow deleting the profile avatar after uploading (by @moorsecopers99) [#9067](https://github.com/penpot/penpot/issues/9067) (PR: [#9068](https://github.com/penpot/penpot/pull/9068))
+- Show an MCP badge in the workspace toolbar when the MCP server is connected in the current tab
 
 ### :bug: Bugs fixed
 - Add Shift+Numpad aliases for zoom shortcuts (by @RenzoMXD) [#2457](https://github.com/penpot/penpot/issues/2457) (PR: [#9063](https://github.com/penpot/penpot/pull/9063))
