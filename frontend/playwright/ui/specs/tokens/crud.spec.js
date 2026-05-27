@@ -8,6 +8,7 @@ import {
   testTokenCreationFlow,
   unfoldTokenType,
   createToken,
+  createSet,
 } from "./helpers";
 
 test.beforeEach(async ({ page }) => {
@@ -1817,21 +1818,6 @@ test("User disables the current set but token still have resolved values shown i
 });
 
 test.describe("User can't create groups that clash with token names", () => {
-  const changeSetInput = async (sidebar, setName, finalKey = "Enter") => {
-    const setInput = sidebar.locator("input:focus");
-    await expect(setInput).toBeVisible();
-    await setInput.fill(setName);
-    await setInput.press(finalKey);
-  };
-
-  const createSet = async (sidebar, setName, finalKey = "Enter") => {
-    const tokensTabButton = sidebar
-      .getByRole("button", { name: "Add set" })
-      .click();
-
-    await changeSetInput(sidebar, setName, (finalKey = "Enter"));
-  };
-
   const createBadToken = async (page, type, name, textFieldName, value) => {
     const tokensTabPanel = page.getByRole("tabpanel", { name: "tokens" });
 

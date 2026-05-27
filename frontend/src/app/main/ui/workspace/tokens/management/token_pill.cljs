@@ -309,7 +309,9 @@
        [:> icon*
         {:icon-id i/broken-link
          :class (stl/css :token-pill-icon)
-         :aria-label (tr "workspace.tokens.missing-reference")}]
+         :aria-label (if name-collision
+                       (wte/resolve-error-message (first errors))
+                       (tr "workspace.tokens.missing-reference"))}]
 
        color
        [:> swatch* {:background color
