@@ -6,6 +6,7 @@ import {
   setupTypographyTokensFileRender,
   unfoldTokenType,
   createToken,
+  createSet,
 } from "./helpers";
 
 test.beforeEach(async ({ page }) => {
@@ -1101,21 +1102,6 @@ test("BUG: 14200, Tokens in sets are applied when clicking on Save during creati
     flags: ["enable-token-combobox", "enable-feature-token-input"],
   });
 
-  const changeSetInput = async (sidebar, setName, finalKey = "Enter") => {
-    const setInput = sidebar.locator("input:focus");
-    await expect(setInput).toBeVisible();
-    await setInput.fill(setName);
-    await setInput.press(finalKey);
-  };
-
-  const createSet = async (sidebar, setName, finalKey = "Enter") => {
-    const tokensTabButton = sidebar
-      .getByRole("button", { name: "Add set" })
-      .click();
-
-    await changeSetInput(sidebar, setName, (finalKey = "Enter"));
-  };
-
   // Select rectangle layer
   await page.getByRole("tab", { name: "Layers" }).click();
 
@@ -1212,21 +1198,6 @@ test("Check token application across sets", async ({ page }) => {
   } = await setupTokensFileRender(page, {
     flags: ["enable-token-combobox", "enable-feature-token-input"],
   });
-
-  const changeSetInput = async (sidebar, setName, finalKey = "Enter") => {
-    const setInput = sidebar.locator("input:focus");
-    await expect(setInput).toBeVisible();
-    await setInput.fill(setName);
-    await setInput.press(finalKey);
-  };
-
-  const createSet = async (sidebar, setName, finalKey = "Enter") => {
-    const tokensTabButton = sidebar
-      .getByRole("button", { name: "Add set" })
-      .click();
-
-    await changeSetInput(sidebar, setName, (finalKey = "Enter"));
-  };
 
   const createTokenInSet = async (tokenName, tokenValue) => {
     await unfoldTokenType(tokensSidebar, "Border radius");
@@ -1788,8 +1759,8 @@ test("BUG: 14234, Numeric input token filtering must be case sensitive", async (
   await tokensTabButton.click();
   await unfoldTokenType(tokensSidebar, "dimensions");
 
-  await createToken(page, "Dimensions", "Dim-up", "Value", "20");
-  await createToken(page, "Dimensions", "dim-up", "Value", "10");
+  await createToken(page, "Dimensions", "Dim-up", "Value", "combobox", "20");
+  await createToken(page, "Dimensions", "dim-up", "Value", "combobox", "10");
   const measuresSection = page.getByRole("region", {
     name: "shape-measures-section",
   });

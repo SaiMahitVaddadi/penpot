@@ -1,0 +1,1029 @@
+#!/usr/bin/env node
+/**
+ * canvas-to-html.mjs
+ *
+ * Reads the current state of every board on Penpot's "Page 1" (via the MCP
+ * REPL plugin), then emits a static HTML document that mirrors each board as
+ * an absolutely-positioned <section> with one HTML element per shape.
+ *
+ * Two modes:
+ *   1. one-shot generator  → writes /tmp/portfolio-canvas-render.html and exits
+ *   2. server (--serve)    → serves the generated HTML on http://127.0.0.1:<port>
+ *                            and re-generates on every request, so a browser
+ *                            refresh = the latest canvas state.
+ *
+ * Conventions match the other portfolio-sync background services
+ * (penpot-bridge, portfolio-watcher, webhook-server, live-preview-server):
+ *   PID  → /tmp/canvas-to-html.pid
+ *   log  → /tmp/canvas-to-html.log
+ *
+ * Zero npm deps — built-in `http`, `fs`, `path`, `url` only.
+ *
+ * Flags:
+ *   --out <path>      write the static HTML to a different path
+ *   --board <name>    only render that one board
+ *   --inline-css      embed CSS in a <style> tag (default behavior)
+ *   --serve           also start an HTTP server on the configured port
+ */
+
+import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname  = path.dirname(__filename);
+const CONFIG_PATH = path.join(__dirname, 'portfolio-sync.config.json');
+
+function readConfig() {
+  try { return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); } catch { return {}; }
+}
+
+const cfg = readConfig();
+const MCP_URL    = 'http://localhost:4401/mcp';
+const HOST       = '127.0.0.1';
+const PORT       = Number(cfg.html_render_port) || 9006;
+const DEFAULT_OUT = '/tmp/portfolio-canvas-render.html';
+
+const args        = process.argv.slice(2);
+const OUT_IDX     = args.indexOf('--out');
+const OUT_PATH    = OUT_IDX !== -1 ? args[OUT_IDX + 1] : DEFAULT_OUT;
+const BOARD_IDX   = args.indexOf('--board');
+const BOARD_PICK  = BOARD_IDX !== -1 ? args[BOARD_IDX + 1] : null;
+const SERVE_MODE  = args.includes('--serve');
+// `--inline-css` is the default; the flag is accepted for future-proofing.
+const INLINE_CSS  = true;
+
+// ─── MCP plumbing (same pattern as build-live-dom-canvas.mjs) ─────────────────
+
+async function mcpInit() {
+  const res = await fetch(MCP_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream' },
+    body: JSON.stringify({
+      jsonrpc: '2.0', id: 1, method: 'initialize',
+      params: { protocolVersion: '2024-11-05', capabilities: {},
+                clientInfo: { name: 'canvas-to-html', version: '1.0' } },
+    }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) throw new Error(`MCP init failed: ${res.status}`);
+  const sid = res.headers.get('mcp-session-id') || res.headers.get('Mcp-Session-Id');
+  await res.text();
+  if (!sid) throw new Error('no MCP session id');
+  return sid;
+}
+
+async function mcpExec(sid, code) {
+  const res = await fetch(MCP_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream', 'mcp-session-id': sid },
+    body: JSON.stringify({
+      jsonrpc: '2.0', id: 2, method: 'tools/call',
+      params: { name: 'execute_code', arguments: { code } },
+    }),
+    signal: AbortSignal.timeout(60_000),
+  });
+  const text = await res.text();
+  const line = text.split('\n').find(l => l.startsWith('data: '));
+  if (!line) throw new Error('MCP empty data frame');
+  const parsed = JSON.parse(line.slice(6));
+  const payload = parsed?.result?.content?.[0]?.text;
+  if (!payload) {
+    if (parsed?.result?.isError) throw new Error('MCP tool error: ' + JSON.stringify(parsed.result));
+    throw new Error('MCP empty content: ' + JSON.stringify(parsed));
+  }
+  if (/^Tool execution failed/.test(payload)) throw new Error(payload);
+  try { return JSON.parse(payload); } catch { return { raw: payload }; }
+}
+
+// ─── Canvas read ──────────────────────────────────────────────────────────────
+
+/**
+ * Reads every page-1 board and its children. Shapes carry `name` prefixes
+ * written by build-live-dom-canvas (e.g. "link: /consulting", "img: alt",
+ * "control: input"); we use those prefixes to recover the original `kind`.
+ *
+ * We deliberately limit ourselves to data that crosses MCP cheaply — color,
+ * font, geometry, text content, link href (parsed from the shape name).
+ */
+async function readCanvas(sid) {
+  const code = `
+const cur = penpot.currentFile.pages.find(p => p.name === 'Page 1') || penpot.currentFile.pages[0];
+if (!cur) return { error: 'no pages' };
+if (penpot.currentPage.id !== cur.id) penpot.openPage(cur);
+
+const ROOT_ID = '00000000-0000-0000-0000-000000000000';
+const all = cur.findShapes();
+const boards = all.filter(s => s.type === 'board' && s.id !== ROOT_ID
+                                && s.parent && s.parent.id === ROOT_ID);
+
+const out = [];
+for (const b of boards) {
+  const fill = (b.fills && b.fills[0]) || null;
+  const children = all.filter(s => s.parent && s.parent.id === b.id);
+  const shapes = children.map(s => {
+    const f = (s.fills && s.fills[0]) || null;
+    const stroke = (s.strokes && s.strokes[0]) || null;
+    // text shapes — text content via .characters; font props on the shape.
+    let chars = null;
+    try { chars = (typeof s.characters === 'string') ? s.characters : null; } catch (_) {}
+    return {
+      id: s.id, type: s.type, name: s.name || '',
+      x: s.x | 0, y: s.y | 0, w: s.width | 0, h: s.height | 0,
+      opacity: typeof s.opacity === 'number' ? s.opacity : 1,
+      borderRadius: typeof s.borderRadius === 'number' ? s.borderRadius : 0,
+      fillColor: f ? f.fillColor || null : null,
+      fillOpacity: f && typeof f.fillOpacity === 'number' ? f.fillOpacity : null,
+      hasFillImage: f ? !!(f.fillImage || f.fillImageUrl || f.fillImageData) : false,
+      strokeColor: stroke ? stroke.strokeColor || null : null,
+      strokeStyle: stroke ? stroke.strokeStyle || null : null,
+      strokeWidth: stroke && typeof stroke.strokeWidth === 'number' ? stroke.strokeWidth : null,
+      text: chars,
+      fontFamily: typeof s.fontFamily === 'string' ? s.fontFamily : null,
+      fontSize:   typeof s.fontSize === 'string' ? s.fontSize : null,
+      fontWeight: typeof s.fontWeight === 'string' ? s.fontWeight : null,
+      textDecoration: typeof s.textDecoration === 'string' ? s.textDecoration : null,
+    };
+  });
+  out.push({
+    id: b.id, name: b.name || 'board',
+    x: b.x | 0, y: b.y | 0, w: b.width | 0, h: b.height | 0,
+    fillColor: fill ? fill.fillColor || null : null,
+    shapes,
+  });
+}
+return { boards: out };
+`;
+  return mcpExec(sid, code);
+}
+
+// ─── Shape → HTML mapping ─────────────────────────────────────────────────────
+
+function escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function escapeAttr(s) { return escapeHtml(s); }
+
+/**
+ * Derive shape kind. build-live-dom-canvas tags each shape via its `name`
+ * field with the kind as a prefix; fall back on shape type/heuristics for
+ * shapes that pre-date this convention or that the user added by hand.
+ */
+// Detect the cssAnimation marker (" ¶anim:<json>" suffix written by
+// build-live-dom-canvas after each shape is created). Returns the parsed
+// payload or null. Side-effect-free — does not mutate the shape.
+function readAnimMarker(s) {
+  const name = s.name || '';
+  const idx = name.indexOf(' ¶anim');
+  if (idx === -1) return null;
+  return { raw: name.slice(idx + 1) };  // visible truthy payload — we only use it as a flag
+}
+
+function classifyShape(s) {
+  // Strip the cssAnimation marker before classification so the prefix tests
+  // still match. e.g. "link: /foo ¶anim:{...}" → "link: /foo".
+  const rawName = s.name || '';
+  const animIdx = rawName.indexOf(' ¶anim');
+  const cleanName = animIdx === -1 ? rawName : rawName.slice(0, animIdx);
+  // Reason: the rest of this fn reads from a virtual shape so the classifier's
+  // slice-by-prefix arithmetic stays correct (e.g. s.name.slice(7) for canvas:).
+  s = { ...s, name: cleanName };
+  const name = cleanName.toLowerCase();
+  if (name.startsWith('link:'))    return { kind: 'link',    href: (s.name.slice(5) || '').trim() };
+  if (name.startsWith('control:')) return { kind: 'control', tag: (s.name.slice(8) || '').trim() };
+  if (name.startsWith('img:'))     return { kind: 'image',   alt: (s.name.slice(4) || '').trim() };
+  if (name.startsWith('svg:'))     return { kind: 'svg' };
+  if (name.startsWith('video:'))    return { kind: 'video',    src: (s.name.slice(6) || '').trim() };
+  if (name.startsWith('iframe:'))   return { kind: 'iframe',   src: (s.name.slice(7) || '').trim() };
+  if (name.startsWith('bg-image:')) return { kind: 'bg-image', src: (s.name.slice(9) || '').trim() };
+  if (name.startsWith('canvas:'))   return { kind: 'canvas',   label: (s.name.slice(7) || '').trim() };
+  if (name.startsWith('lottie:'))   return { kind: 'lottie',   src: (s.name.slice(7) || '').trim() };
+  // video/iframe/canvas/lottie placeholders write a separate "<kind>-label"
+  // text shape — skip rendering, the placeholder div already shows the label.
+  if (name === 'video-label' || name === 'iframe-label' ||
+      name === 'canvas-label' || name === 'lottie-label') return { kind: 'media-label' };
+  if (name === 'line')             return { kind: 'line' };
+  if (name === 'screenshot-backdrop') return { kind: 'backdrop' };
+  if (name === 'heading' || /^h[1-6]$/.test(name)) return { kind: 'heading' };
+  if (name === 'paragraph')        return { kind: 'paragraph' };
+  if (name === 'button')           return { kind: 'button' };
+  // Shape-type fallbacks: text shapes default to paragraph, rectangles default
+  // to line (rare for hand-added shapes — most generated content carries one
+  // of the prefixes above).
+  if (s.type === 'text')           return { kind: 'paragraph' };
+  if (s.type === 'rectangle' && s.hasFillImage) return { kind: 'image', alt: '' };
+  if (s.type === 'rectangle')      return { kind: 'line' };
+  return { kind: 'paragraph' };
+}
+
+function shapeStyle(s, extra = '') {
+  const parts = [
+    'position:absolute',
+    `left:${s.x}px`,
+    `top:${s.y}px`,
+    `width:${s.w}px`,
+  ];
+  // Don't pin `height` for text — let the content reflow vertically — but DO
+  // pin it for placeholders/lines/controls so the layout stays geometrically
+  // truthful.
+  if (extra && extra.includes('height:')) {
+    parts.push(extra);
+  } else {
+    parts.push(extra);
+  }
+  return parts.filter(Boolean).join(';');
+}
+
+function fontShorthand(s) {
+  // Reason: this shorthand is interpolated into `style="..."`. Double quotes
+  // around the family name would terminate the attribute mid-string and the
+  // browser would drop every declaration after it (color, margin, etc.) —
+  // which is exactly what was wrecking the render. Use single quotes inside
+  // the attribute instead, and pick a sensible generic fallback per family
+  // so the system-font fallback at least has the right *shape* if the web
+  // font hasn't loaded.
+  const rawFam  = (s.fontFamily || '').replace(/['"]/g, '').trim();
+  const fam     = rawFam ? `'${rawFam}'` : '';
+  const generic = (() => {
+    const f = rawFam.toLowerCase();
+    if (!f) return 'system-ui, sans-serif';
+    if (f.includes('mono') || f.includes('jetbrains')) return 'ui-monospace, SFMono-Regular, Menlo, monospace';
+    if (f.includes('fraunces') || f.includes('garamond') || f.includes('serif')) return 'Georgia, serif';
+    return 'system-ui, sans-serif';
+  })();
+  const stack  = fam ? `${fam}, ${generic}` : generic;
+  const size   = s.fontSize ? `${parseInt(s.fontSize, 10) || 16}px` : '16px';
+  const weight = s.fontWeight || '400';
+  return `${weight} ${size}/1.35 ${stack}`;
+}
+
+// Marker glyph tucked into the top-right corner of a placeholder, used to
+// flag shapes whose source DOM element carried `animation` or `transition`.
+// Returns the HTML fragment for the dot or '' when no marker is needed.
+//
+// Disabled by default — on any reasonably modern site (Tailwind, design
+// systems, frameworks that ship transitions by default) almost every shape
+// triggers the marker, which made the preview look like it was covered in
+// red dust. Opt back in with PORTFOLIO_SYNC_SHOW_ANIM_MARKERS=1; the opt-in
+// glyph is a subtle 2px dim-grey dot, not the old loud 6px red splat.
+const SHOW_ANIM_MARKERS = process.env.PORTFOLIO_SYNC_SHOW_ANIM_MARKERS === '1';
+function animDotHtml(s) {
+  if (!SHOW_ANIM_MARKERS) return '';
+  if (!readAnimMarker(s)) return '';
+  return `<span title="css animation" style="position:absolute;right:3px;top:3px;width:2px;height:2px;border-radius:50%;background:#9ca3af;opacity:0.6;pointer-events:none"></span>`;
+}
+
+function renderShape(s, board) {
+  const k = classifyShape(s);
+  const color = s.fillColor || '#0a0a0a';
+  // Reason: Penpot's plugin API reports shape x/y in ABSOLUTE canvas-space,
+  // not board-local. The enclosing <section> is `position:relative` and
+  // we want children to resolve against its origin, so subtract the board's
+  // own x/y. For shapes already produced board-local by older builds we
+  // detect that case (|s.x - board.x| > board.w*4) and pass through.
+  const bx = board?.x || 0;
+  const by = board?.y || 0;
+  const bw = board?.w || 0;
+  const sxAbs = (typeof s.x === 'number') ? s.x : 0;
+  const syAbs = (typeof s.y === 'number') ? s.y : 0;
+  // Heuristic: if the shape sits within the board's bounds when treated as
+  // board-local (sxAbs < bw), assume it's already board-local. Otherwise
+  // subtract the board anchor.
+  const localish = sxAbs >= 0 && sxAbs <= bw && bw > 0;
+  const lx = localish ? sxAbs : (sxAbs - bx);
+  const ly = localish ? syAbs : (syAbs - by);
+  const baseStyle = `position:absolute;left:${lx}px;top:${ly}px;width:${s.w}px;`;
+  const animDot = animDotHtml(s);
+
+  if (k.kind === 'backdrop') {
+    // Screenshot backdrop is faded on the canvas — replicate as a faint label.
+    return ''; // skip entirely; the section background carries enough context
+  }
+
+  if (k.kind === 'media-label') {
+    // Label is baked into the video/iframe placeholder div below — skip
+    // duplicate rendering of the standalone Penpot text shape.
+    return '';
+  }
+
+  if (k.kind === 'video') {
+    // Reason: src lives in the shape name ("video: <src>"). Use the poster
+    // via background-image if Penpot stored one in the fill (best-effort —
+    // we can't read the image bytes back through MCP cheaply, so we render
+    // a dark placeholder with a centered "▶ video" label that matches the
+    // canvas appearance).
+    const src = (k.src || '').slice(0, 120);
+    const bg = s.hasFillImage ? '#1a1a1a' : (s.fillColor || '#2a2a2a');
+    return `<div title="${escapeAttr(src)}" style="${baseStyle}height:${s.h}px;background:${escapeAttr(bg)};display:flex;align-items:center;justify-content:center;color:#fff;font:600 16px system-ui,sans-serif;box-sizing:border-box">▶ video${animDot}</div>`;
+  }
+
+  if (k.kind === 'iframe') {
+    // Reason: render the host as a label inside a dashed-border placeholder.
+    // Don't embed the actual iframe — embedding arbitrary URLs is a load /
+    // security concern (mixed content, third-party cookies, CSP).
+    const src = (k.src || '').slice(0, 120);
+    let host = '';
+    try { host = new URL(src).host; } catch (_) { host = src.slice(0, 40); }
+    const label = `iframe: ${host}`;
+    return `<div title="${escapeAttr(src)}" style="${baseStyle}height:${s.h}px;background:#f0f0f0;border:1px dashed #888;box-sizing:border-box;display:flex;align-items:center;justify-content:center;color:#555;font:500 13px system-ui,sans-serif;text-align:center;padding:8px">${escapeHtml(label)}${animDot}</div>`;
+  }
+
+  if (k.kind === 'canvas') {
+    // Reason: the consulting page's starfield is a WebGL canvas; render as a
+    // near-black placeholder with the centered label that mirrors the Penpot
+    // shape ("canvas: webgl WxH" → "canvas: WxH (webgl)").
+    const lab = (k.label || '').toLowerCase();
+    const isWebGL = lab.includes('webgl');
+    const wh = lab.replace(/webgl\s*/i, '').trim() || `${s.w}x${s.h}`;
+    const display = `canvas: ${wh}${isWebGL ? ' (webgl)' : ''}`;
+    const bg = s.hasFillImage ? 'transparent' : '#0a0a0a';
+    const bgImg = s.hasFillImage ? '' : '';
+    return `<div title="${escapeAttr(display)}" style="${baseStyle}height:${s.h}px;background:${bg};${bgImg}display:flex;align-items:center;justify-content:center;color:#ffffff;font:600 14px system-ui,sans-serif;box-sizing:border-box">${escapeHtml(display)}${animDot}</div>`;
+  }
+
+  if (k.kind === 'lottie') {
+    const src = (k.src || '').slice(0, 200);
+    let fname = src;
+    try { fname = (new URL(src, 'http://x/').pathname.split('/').pop()) || src; } catch (_) {}
+    const label = `lottie: ${fname}`.slice(0, 80);
+    return `<div title="${escapeAttr(src)}" style="${baseStyle}height:${s.h}px;background:#f5f0fa;border:1px dashed #9b6dc7;box-sizing:border-box;display:flex;align-items:center;justify-content:center;color:#6c3a9b;font:500 12px system-ui,sans-serif;text-align:center;padding:6px">${escapeHtml(label)}${animDot}</div>`;
+  }
+
+  if (k.kind === 'bg-image') {
+    // Reason: render as a div whose background-image is the original URL.
+    // background-size: cover + background-position: center mirrors the
+    // dominant CSS pattern; pages that use `background-size: contain` lose
+    // a tiny bit of fidelity but the bbox is correct.
+    const src = (k.src || '').slice(0, 200);
+    return `<div title="${escapeAttr(src)}" style="${baseStyle}height:${s.h}px;background-image:url('${escapeAttr(src)}');background-size:cover;background-position:center;background-repeat:no-repeat">${animDot}</div>`;
+  }
+
+  if (k.kind === 'line') {
+    const fillColor = s.fillColor || '#cccccc';
+    const opacity = s.fillOpacity != null ? `;opacity:${s.fillOpacity}` : '';
+    // Lines are tiny — skip the dot (the 6px marker would dominate a 2px line).
+    return `<div style="${baseStyle}height:${Math.max(1, s.h)}px;background-color:${escapeAttr(fillColor)}${opacity}"></div>`;
+  }
+
+  if (k.kind === 'image' || k.kind === 'svg') {
+    const label = (k.alt || s.name || k.kind).slice(0, 80);
+    const bg = s.fillColor || '#f5f5f5';
+    const border = s.strokeColor || '#888888';
+    return `<div style="${baseStyle}height:${s.h}px;background:${escapeAttr(bg)};border:1px dashed ${escapeAttr(border)};box-sizing:border-box;display:flex;align-items:center;justify-content:center;color:#555;font:12px system-ui,sans-serif;text-align:center;padding:4px">${escapeHtml(label)}${animDot}</div>`;
+  }
+
+  if (k.kind === 'control') {
+    const placeholder = (s.text || k.tag || 'input').slice(0, 120);
+    const isTextarea = /textarea/i.test(k.tag);
+    const style = `${baseStyle}height:${s.h}px;box-sizing:border-box;border:1px solid #cccccc;border-radius:4px;padding:4px 8px;font:14px system-ui,sans-serif`;
+    if (isTextarea) {
+      return `<textarea style="${style}" placeholder="${escapeAttr(placeholder)}"></textarea>`;
+    }
+    return `<input style="${style}" placeholder="${escapeAttr(placeholder)}" />`;
+  }
+
+  // Text-like kinds: heading / paragraph / link / button
+  const font = fontShorthand(s);
+  const text = escapeHtml(s.text || '');
+  const decoration = s.textDecoration === 'underline' ? ';text-decoration:underline' : '';
+  const textStyle = `${baseStyle}font:${font};color:${escapeAttr(color)};margin:0${decoration}`;
+  // Reason: text shapes don't have a positioned ancestor (they're direct
+  // section children), so the marker dot has to be emitted as a sibling at
+  // the shape's top-right pixel coordinate. Use the same lx/ly as the
+  // shape so the dot follows the absolute-vs-board-local normalization.
+  const textAnimDot = (SHOW_ANIM_MARKERS && readAnimMarker(s))
+    ? `<span title="css animation" style="position:absolute;left:${lx + s.w - 4}px;top:${ly + 2}px;width:2px;height:2px;border-radius:50%;background:#9ca3af;opacity:0.6;pointer-events:none"></span>`
+    : '';
+
+  let el;
+  if (k.kind === 'link') {
+    const href = k.href || '#';
+    el = `<a href="${escapeAttr(href)}" style="${textStyle}">${text}</a>`;
+  } else if (k.kind === 'button') {
+    el = `<button style="${textStyle};background:transparent;border:0;cursor:pointer;text-align:left">${text}</button>`;
+  } else if (k.kind === 'heading') {
+    el = `<h2 style="${textStyle}">${text}</h2>`;
+  } else {
+    el = `<p style="${textStyle}">${text}</p>`;
+  }
+  return el + textAnimDot;
+}
+
+// ─── Document assembly ───────────────────────────────────────────────────────
+
+function buildHtml(boards) {
+  // Reason: boards are laid out side-by-side on the canvas with an x-offset.
+  // Mirror that horizontal flow in the static page so the user sees the same
+  // arrangement they see in Penpot. Each <section> is `position:relative` and
+  // shape coords are already board-local, so they resolve directly against
+  // the section origin.
+  // Reason: HTML stacking ignores Penpot z-order — later `position:absolute`
+  // elements paint on top. The shapes we emit cluster into two tiers: visual
+  // *backdrops* (canvas/iframe/video/bg-image/image/backdrop/svg/line, plus
+  // any rectangle that covers most of its board) and *foreground* content
+  // (text/links/buttons/controls). Without a sort, an opaque backdrop late
+  // in the list (e.g. the WebGL canvas placeholder on /consulting at the
+  // top of the board) buries every text shape that appeared earlier — which
+  // is why the consulting board read as a solid #060a14 wall. Stable-sort
+  // backdrops first so foreground text/links/buttons always paint on top
+  // regardless of how the build pipeline ordered them.
+  const BACKDROP_KINDS = new Set([
+    'backdrop', 'canvas', 'iframe', 'video', 'bg-image',
+    'image', 'svg', 'line',
+  ]);
+  const isBackdropShape = (s, boardW, boardH) => {
+    const k = classifyShape(s);
+    if (BACKDROP_KINDS.has(k.kind)) return true;
+    // Big opaque rectangles (>=60% of board width AND >=25% of board height)
+    // behave as backdrops too; render them first so text overlays them.
+    if (k.kind === 'line' || s.type === 'rectangle') {
+      const wRatio = boardW ? (s.w || 0) / boardW : 0;
+      const hRatio = boardH ? (s.h || 0) / boardH : 0;
+      if (wRatio >= 0.6 && hRatio >= 0.25) return true;
+    }
+    return false;
+  };
+  // Reason: CSS multi-column layouts (the home page's "practice" 2-column
+  // text and the publication list) make each <p>'s getBoundingClientRect()
+  // span the FULL column-box, so the harvester records the same text twice
+  // — once at column 1's x, once at column 2's x. The build-side dedup keys
+  // by (kind,x,y,text-prefix) which doesn't catch this because the x differs.
+  // De-overlap here: when two text shapes carry identical (non-empty) text
+  // and one's bbox sits inside the other's grown bbox, drop the duplicate.
+  // Also collapse exact text-coordinate twins that the build dedup missed
+  // (e.g. text first 40 chars matched but full text diverged).
+  const dedupeGhosts = (shapes) => {
+    const normText = (t) => (t || '').replace(/\s+/g, ' ').trim();
+    const isText = (s) => {
+      const k = classifyShape(s);
+      return k.kind === 'heading' || k.kind === 'paragraph'
+          || k.kind === 'link' || k.kind === 'button';
+    };
+    const drop = new Set();
+    for (let i = 0; i < shapes.length; i++) {
+      const a = shapes[i];
+      if (!a || drop.has(a) || !isText(a)) continue;
+      const at = normText(a.text);
+      if (at.length < 8) continue; // skip tiny labels — risk of legit repeats
+      for (let j = i + 1; j < shapes.length; j++) {
+        const b = shapes[j];
+        if (!b || drop.has(b) || !isText(b)) continue;
+        if (normText(b.text) !== at) continue;
+        // Same text. Drop whichever has the smaller area (the bleed copy is
+        // usually the narrower one Penpot resolved at the secondary column).
+        const areaA = Math.max(0, a.w || 0) * Math.max(0, a.h || 0);
+        const areaB = Math.max(0, b.w || 0) * Math.max(0, b.h || 0);
+        if (areaA >= areaB) drop.add(b); else { drop.add(a); break; }
+      }
+    }
+    return shapes.filter(s => !drop.has(s));
+  };
+  const sections = boards.map(b => {
+    const bgColor = b.fillColor || '#ffffff';
+    const deduped = dedupeGhosts(b.shapes);
+    const ordered = deduped
+      .map((s, i) => ({ s, i, bg: isBackdropShape(s, b.w, b.h) }))
+      .sort((a, b) => (a.bg === b.bg ? a.i - b.i : (a.bg ? -1 : 1)))
+      .map(x => x.s);
+    const shapes  = ordered.map(s => renderShape(s, b)).filter(Boolean).join('\n      ');
+    return `    <section data-board="${escapeAttr(b.name)}" style="position:relative;width:${b.w}px;height:${b.h}px;background-color:${escapeAttr(bgColor)};flex:0 0 auto">
+      <div class="ppc-board-label">${escapeHtml(b.name)} · ${b.w}×${b.h}</div>
+      ${shapes}
+    </section>`;
+  }).join('\n');
+
+  // Layers panel: one collapsible group per board, one row per shape. Pure
+  // visual mimicry — no editing wiring, no JS state, just <details>.
+  const SHAPE_GLYPH = {
+    heading:   'T',
+    paragraph: 'T',
+    link:      '↗',
+    button:    '▢',
+    image:     '▣',
+    svg:       '◆',
+    line:      '—',
+    control:   '▭',
+    backdrop:  '▢',
+  };
+  const layersHtml = boards.map(b => {
+    const rows = b.shapes.map(s => {
+      const k = classifyShape(s);
+      const glyph = SHAPE_GLYPH[k.kind] || '·';
+      const label = (s.text || s.name || k.kind).toString().replace(/^(link:|img:|control:|svg:)\s*/i, '').slice(0, 48) || k.kind;
+      return `        <li class="ppc-layer"><span class="ppc-layer-glyph">${escapeHtml(glyph)}</span><span class="ppc-layer-name" title="${escapeAttr(label)}">${escapeHtml(label)}</span></li>`;
+    }).join('\n');
+    return `      <details class="ppc-board-group" open>
+        <summary><span class="ppc-board-chevron">▾</span><span class="ppc-board-name">${escapeHtml(b.name)}</span><span class="ppc-board-count">${b.shapes.length}</span></summary>
+        <ul class="ppc-layer-list">
+${rows}
+        </ul>
+      </details>`;
+  }).join('\n');
+
+  const totalShapes = boards.reduce((n, b) => n + b.shapes.length, 0);
+  const now = new Date().toISOString().replace('T', ' ').replace(/\..+$/, '') + ' UTC';
+  const pageTitle = 'Page 1';
+  const pageSubtitle = `${boards.length} board${boards.length === 1 ? '' : 's'} · ${totalShapes} shape${totalShapes === 1 ? '' : 's'}`;
+
+  const css = INLINE_CSS ? `
+    /* ─── Penpot-editor-style chrome ─────────────────────────────────────────
+       Visual mimicry of the Penpot editor. Palette pulled from
+       frontend/resources/styles/common/refactor/color-defs.scss (#18181a
+       dark) and the prompt's #eeeef1 light panel. No editing wiring. */
+    :root {
+      --ppc-bg:        #f4f4f6;
+      --ppc-panel:     #eeeef1;
+      --ppc-rule:      #d9d9de;
+      --ppc-rule-soft: #e4e4e9;
+      --ppc-text:      #1f1f1f;
+      --ppc-text-dim:  #6c6c74;
+      --ppc-accent:    #6911d4;
+      --ppc-canvas-bg: #d9d9de;
+    }
+    [data-ppc-theme="dark"] {
+      --ppc-bg:        #1d1d20;
+      --ppc-panel:     #18181a;
+      --ppc-rule:      #2a2a2d;
+      --ppc-rule-soft: #232326;
+      --ppc-text:      #e8e8ea;
+      --ppc-text-dim:  #8a8a92;
+      --ppc-accent:    #b692f6;
+      --ppc-canvas-bg: #2a2a2d;
+    }
+
+    html, body { height: 100%; }
+    body {
+      margin: 0; padding: 0;
+      background: var(--ppc-bg);
+      color: var(--ppc-text);
+      font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, system-ui, sans-serif;
+      overflow: hidden;
+    }
+
+    .ppc-app {
+      display: grid;
+      grid-template-rows: 44px 1fr 24px;
+      grid-template-columns: 248px 1fr 280px;
+      grid-template-areas:
+        "topbar topbar  topbar"
+        "left   canvas  right"
+        "status status  status";
+      height: 100vh;
+      width: 100vw;
+    }
+
+    /* Top toolbar ─────────────────────────────────────────────────────────── */
+    .ppc-topbar {
+      grid-area: topbar;
+      display: flex; align-items: center; gap: 8px;
+      padding: 0 12px;
+      background: var(--ppc-panel);
+      border-bottom: 1px solid var(--ppc-rule);
+    }
+    .ppc-logo {
+      width: 24px; height: 24px;
+      display: inline-flex; align-items: center; justify-content: center;
+      background: var(--ppc-accent); color: #fff;
+      border-radius: 4px; font-weight: 700; font-size: 13px;
+    }
+    .ppc-file {
+      display: flex; flex-direction: column; line-height: 1.15;
+      padding: 0 6px; margin-right: 4px;
+    }
+    .ppc-file-name { font-weight: 600; font-size: 12px; }
+    .ppc-file-meta { font-size: 10px; color: var(--ppc-text-dim); font-family: ui-monospace, Menlo, monospace; }
+    .ppc-tool-group { display: inline-flex; gap: 2px; padding: 0 4px;
+      border-left: 1px solid var(--ppc-rule-soft); height: 24px; align-items: center; }
+    .ppc-tool {
+      width: 26px; height: 26px;
+      display: inline-flex; align-items: center; justify-content: center;
+      border-radius: 4px; color: var(--ppc-text-dim);
+      font-size: 13px; cursor: default; user-select: none;
+    }
+    .ppc-tool:hover { background: var(--ppc-rule-soft); color: var(--ppc-text); }
+    .ppc-spacer { flex: 1; }
+    .ppc-presence { display: inline-flex; gap: -4px; align-items: center; padding-right: 6px; }
+    .ppc-avatar {
+      width: 24px; height: 24px; border-radius: 50%;
+      background: linear-gradient(135deg, #ff9d6c, #bb4e75);
+      color: #fff; font-size: 10px; font-weight: 600;
+      display: inline-flex; align-items: center; justify-content: center;
+      border: 2px solid var(--ppc-panel); margin-left: -6px;
+    }
+    .ppc-avatar.b { background: linear-gradient(135deg, #6f9eff, #6911d4); }
+    .ppc-share {
+      background: var(--ppc-accent); color: #fff;
+      border: 0; border-radius: 6px; padding: 6px 12px;
+      font-size: 11px; font-weight: 600; cursor: default;
+    }
+    .ppc-mode-toggle {
+      background: transparent; border: 1px solid var(--ppc-rule);
+      color: var(--ppc-text-dim);
+      border-radius: 4px; padding: 4px 8px; font-size: 11px;
+      cursor: pointer; margin-left: 4px;
+      font-family: ui-monospace, Menlo, monospace;
+    }
+    .ppc-mode-toggle:hover { color: var(--ppc-text); border-color: var(--ppc-text-dim); }
+
+    /* Left layers panel ─────────────────────────────────────────────────────── */
+    .ppc-left {
+      grid-area: left;
+      background: var(--ppc-panel);
+      border-right: 1px solid var(--ppc-rule);
+      display: flex; flex-direction: column;
+      overflow: hidden;
+    }
+    .ppc-panel-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 14px;
+      font-size: 11px; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.06em;
+      color: var(--ppc-text-dim);
+      border-bottom: 1px solid var(--ppc-rule-soft);
+      font-family: ui-monospace, Menlo, monospace;
+    }
+    .ppc-panel-tabs { display: flex; gap: 16px; }
+    .ppc-panel-tab { cursor: default; }
+    .ppc-panel-tab.active { color: var(--ppc-text); }
+    .ppc-layers-scroll { overflow-y: auto; padding: 6px 0 12px; flex: 1; }
+
+    .ppc-board-group { padding: 0; }
+    .ppc-board-group > summary {
+      display: flex; align-items: center; gap: 6px;
+      padding: 6px 10px; cursor: pointer; list-style: none;
+      font-size: 12px; font-weight: 600;
+    }
+    .ppc-board-group > summary::-webkit-details-marker { display: none; }
+    .ppc-board-group > summary:hover { background: var(--ppc-rule-soft); }
+    .ppc-board-chevron { color: var(--ppc-text-dim); width: 12px; text-align: center; }
+    .ppc-board-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ppc-board-count {
+      font-size: 10px; color: var(--ppc-text-dim);
+      font-family: ui-monospace, Menlo, monospace;
+    }
+    .ppc-layer-list { list-style: none; margin: 0; padding: 0; }
+    .ppc-layer {
+      display: flex; align-items: center; gap: 8px;
+      padding: 3px 10px 3px 28px;
+      font-size: 11.5px; color: var(--ppc-text);
+      cursor: default;
+    }
+    .ppc-layer:hover { background: var(--ppc-rule-soft); }
+    .ppc-layer-glyph {
+      width: 14px; text-align: center; color: var(--ppc-text-dim);
+      font-family: ui-monospace, Menlo, monospace; font-size: 11px;
+    }
+    .ppc-layer-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+
+    /* Canvas area ───────────────────────────────────────────────────────────── */
+    .ppc-center {
+      grid-area: canvas;
+      background: var(--ppc-canvas-bg);
+      overflow: auto;
+      position: relative;
+    }
+    .ppc-rulers-bg {
+      position: sticky; top: 0; left: 0;
+      pointer-events: none;
+    }
+    .canvas-wrap {
+      /* Reason: stack boards vertically. Horizontal flex left consulting/blog
+         off-screen at 1440px each, unreachable without horizontal scroll. */
+      display: flex; flex-direction: column; gap: 64px; padding: 48px;
+      align-items: flex-start; min-width: max-content;
+    }
+    section[data-board] {
+      box-shadow: 0 4px 24px rgba(0,0,0,0.18), 0 1px 2px rgba(0,0,0,0.12);
+      overflow: hidden; border-radius: 2px;
+    }
+    .ppc-board-label {
+      position: absolute; top: -22px; left: 0;
+      font: 11px/1 ui-monospace, Menlo, monospace;
+      color: var(--ppc-text-dim);
+      pointer-events: none; white-space: nowrap;
+    }
+
+    /* Right properties panel ────────────────────────────────────────────────── */
+    .ppc-right {
+      grid-area: right;
+      background: var(--ppc-panel);
+      border-left: 1px solid var(--ppc-rule);
+      overflow-y: auto;
+    }
+    .ppc-design-section {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--ppc-rule-soft);
+    }
+    .ppc-design-section h3 {
+      margin: 0 0 8px 0;
+      font-size: 11px; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.06em;
+      color: var(--ppc-text-dim);
+      font-family: ui-monospace, Menlo, monospace;
+    }
+    .ppc-prop-row {
+      display: grid; grid-template-columns: 80px 1fr;
+      align-items: center; gap: 8px;
+      padding: 4px 0; font-size: 11.5px;
+    }
+    .ppc-prop-row .k { color: var(--ppc-text-dim); }
+    .ppc-prop-row .v {
+      font-family: ui-monospace, Menlo, monospace;
+      font-size: 11px; color: var(--ppc-text);
+    }
+    .ppc-page-title { font-size: 14px; font-weight: 600; margin: 0 0 2px 0; }
+    .ppc-page-subtitle { font-size: 11px; color: var(--ppc-text-dim); margin: 0; }
+    .ppc-swatch {
+      display: inline-block; width: 12px; height: 12px;
+      border-radius: 2px; vertical-align: -2px;
+      border: 1px solid rgba(0,0,0,0.15); margin-right: 6px;
+    }
+
+    /* Status bar ────────────────────────────────────────────────────────────── */
+    .ppc-status {
+      grid-area: status;
+      background: var(--ppc-panel);
+      border-top: 1px solid var(--ppc-rule);
+      display: flex; align-items: center;
+      padding: 0 14px; gap: 16px;
+      font: 11px/1 ui-monospace, Menlo, monospace;
+      color: var(--ppc-text-dim);
+    }
+    .ppc-status .ppc-spacer { flex: 1; }
+
+    /* Per-shape resets (preserve inline styling on board content) ──────────── */
+    section[data-board] h1, section[data-board] h2, section[data-board] h3,
+    section[data-board] h4, section[data-board] h5, section[data-board] h6,
+    section[data-board] p, section[data-board] a, section[data-board] button {
+      margin: 0; padding: 0; border: 0; background: transparent;
+      font-weight: inherit; font-size: inherit; font-family: inherit;
+      color: inherit; text-decoration: inherit;
+    }
+    section[data-board] a { color: inherit; text-decoration: none; }
+  ` : '';
+
+  // Mode toggle is purely cosmetic — flips the [data-ppc-theme] attribute on
+  // <html>. Self-contained inline handler; no external JS, no persisted state.
+  const toggleJs = `
+    (function(){
+      var root = document.documentElement;
+      var btn  = document.getElementById('ppc-mode-toggle');
+      if (!btn) return;
+      btn.addEventListener('click', function () {
+        var next = root.getAttribute('data-ppc-theme') === 'dark' ? 'light' : 'dark';
+        root.setAttribute('data-ppc-theme', next);
+        btn.textContent = next === 'dark' ? '☾ dark' : '☀ light';
+      });
+    })();
+  `;
+
+  return `<!doctype html>
+<html lang="en" data-ppc-theme="light">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Penpot canvas render</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:wght@300;400;500;600;700&family=EB+Garamond:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=Work+Sans:wght@400;500;600;700&display=swap" />
+${INLINE_CSS ? `<style>${css}</style>` : ''}
+</head>
+<body>
+  <div class="ppc-app">
+    <header class="ppc-topbar">
+      <span class="ppc-logo" aria-hidden="true">P</span>
+      <div class="ppc-file">
+        <span class="ppc-file-name">portfolio</span>
+        <span class="ppc-file-meta">${escapeHtml(pageTitle)}</span>
+      </div>
+      <div class="ppc-tool-group" aria-hidden="true">
+        <span class="ppc-tool" title="Undo">↶</span>
+        <span class="ppc-tool" title="Redo">↷</span>
+      </div>
+      <div class="ppc-tool-group" aria-hidden="true">
+        <span class="ppc-tool" title="Select">▭</span>
+        <span class="ppc-tool" title="Rectangle">▢</span>
+        <span class="ppc-tool" title="Ellipse">◯</span>
+        <span class="ppc-tool" title="Text">T</span>
+        <span class="ppc-tool" title="Image">▣</span>
+        <span class="ppc-tool" title="Comments">💬</span>
+      </div>
+      <span class="ppc-spacer"></span>
+      <div class="ppc-presence" aria-hidden="true">
+        <span class="ppc-avatar">SV</span>
+        <span class="ppc-avatar b">P</span>
+      </div>
+      <button class="ppc-mode-toggle" id="ppc-mode-toggle" type="button">☀ light</button>
+      <button class="ppc-share" type="button">Share</button>
+    </header>
+
+    <aside class="ppc-left">
+      <div class="ppc-panel-header">
+        <div class="ppc-panel-tabs">
+          <span class="ppc-panel-tab active">Layers</span>
+          <span class="ppc-panel-tab">Assets</span>
+        </div>
+        <span title="${escapeAttr(boards.length + ' boards')}">${boards.length}</span>
+      </div>
+      <div class="ppc-layers-scroll">
+${layersHtml}
+      </div>
+    </aside>
+
+    <main class="ppc-center">
+      <div class="canvas-wrap">
+${sections}
+      </div>
+    </main>
+
+    <aside class="ppc-right">
+      <div class="ppc-design-section">
+        <h3>Page</h3>
+        <p class="ppc-page-title">${escapeHtml(pageTitle)}</p>
+        <p class="ppc-page-subtitle">${escapeHtml(pageSubtitle)}</p>
+      </div>
+      <div class="ppc-design-section">
+        <h3>Design</h3>
+        <div class="ppc-prop-row"><span class="k">Width</span><span class="v">${boards.reduce((m, b) => Math.max(m, b.w), 0)} px</span></div>
+        <div class="ppc-prop-row"><span class="k">Height</span><span class="v">${boards.reduce((m, b) => Math.max(m, b.h), 0)} px</span></div>
+        <div class="ppc-prop-row"><span class="k">Boards</span><span class="v">${boards.length}</span></div>
+        <div class="ppc-prop-row"><span class="k">Shapes</span><span class="v">${totalShapes}</span></div>
+      </div>
+      <div class="ppc-design-section">
+        <h3>Fills</h3>
+        ${boards.map(b => `<div class="ppc-prop-row"><span class="k">${escapeHtml(b.name)}</span><span class="v"><span class="ppc-swatch" style="background:${escapeAttr(b.fillColor || '#ffffff')}"></span>${escapeHtml(b.fillColor || '#ffffff')}</span></div>`).join('')}
+      </div>
+      <div class="ppc-design-section">
+        <h3>Export</h3>
+        <div class="ppc-prop-row"><span class="k">Format</span><span class="v">HTML (static)</span></div>
+        <div class="ppc-prop-row"><span class="k">Source</span><span class="v">MCP @ :4401</span></div>
+      </div>
+    </aside>
+
+    <footer class="ppc-status">
+      <span>100%</span>
+      <span>${escapeHtml(pageTitle)}</span>
+      <span>${boards.length} board${boards.length === 1 ? '' : 's'}</span>
+      <span class="ppc-spacer"></span>
+      <span>last render ${escapeHtml(now)}</span>
+      <span>canvas-to-html · :${PORT}</span>
+    </footer>
+  </div>
+  <script>${toggleJs}</script>
+</body>
+</html>
+`;
+}
+
+function buildEmptyHtml(message) {
+  // 503-ish HTML body used when MCP is unreachable — keeps the server quiet
+  // instead of crashing, with a clear pointer to the auto-login page.
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Penpot canvas render — waiting</title>
+<style>
+  body { margin: 0; padding: 48px; background: #fafafa; font: 15px/1.5 system-ui, sans-serif; color: #222; max-width: 720px; }
+  code { background: #eee; padding: 2px 6px; border-radius: 4px; }
+  a { color: #1057d6; }
+</style>
+</head>
+<body>
+  <h1>Canvas render not available</h1>
+  <p>${escapeHtml(message)}</p>
+  <p>If the Penpot plugin isn't connected, open
+    <a href="http://localhost:9001/auto-login.html">http://localhost:9001/auto-login.html</a>
+    to launch the editor and re-attach the MCP REPL plugin, then refresh this page.</p>
+</body>
+</html>
+`;
+}
+
+// ─── Generation entry-point ──────────────────────────────────────────────────
+
+async function generate({ boardFilter = null } = {}) {
+  const sid = await mcpInit();
+  const res = await readCanvas(sid);
+  if (res?.result?.error) throw new Error(res.result.error);
+  let boards = res?.result?.boards || [];
+  if (boardFilter) boards = boards.filter(b => b.name === boardFilter);
+  // Reason: MCP findShapes() returns boards in id-creation order, which
+  // doesn't match the intended page sequence. The config's `pages` array is
+  // the source of truth — sort to match it, then append anything else.
+  const pageOrder = Array.isArray(cfg.pages) ? cfg.pages.map(p => p.name) : [];
+  if (pageOrder.length) {
+    const rank = new Map(pageOrder.map((n, i) => [n, i]));
+    boards.sort((a, b) => {
+      const ra = rank.has(a.name) ? rank.get(a.name) : 999;
+      const rb = rank.has(b.name) ? rank.get(b.name) : 999;
+      if (ra !== rb) return ra - rb;
+      return a.name.localeCompare(b.name);
+    });
+  } else {
+    boards.sort((a, b) => a.name.localeCompare(b.name));
+  }
+  return buildHtml(boards);
+}
+
+// ─── CLI / Server ────────────────────────────────────────────────────────────
+
+async function runOnce() {
+  try {
+    const html = await generate({ boardFilter: BOARD_PICK });
+    fs.writeFileSync(OUT_PATH, html);
+    console.log(`[canvas-to-html] wrote ${OUT_PATH} (${html.length} bytes)`);
+    return 0;
+  } catch (err) {
+    console.error(`[canvas-to-html] error: ${err.message}`);
+    return 1;
+  }
+}
+
+function isMcpDownError(msg) {
+  return /No Penpot plugin instances are currently connected/i.test(msg)
+      || /MCP init failed/i.test(msg)
+      || /ECONNREFUSED/i.test(msg)
+      || /fetch failed/i.test(msg);
+}
+
+function startServer() {
+  const server = http.createServer(async (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+
+    if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      res.writeHead(405, { 'Content-Type': 'text/plain' });
+      res.end('Method Not Allowed');
+      return;
+    }
+
+    // We ignore the URL path — there's a single endpoint that re-renders the
+    // whole canvas. Sub-resources (favicon etc.) get the same body so we don't
+    // 404 the browser into the console.
+    try {
+      const url = new URL(req.url, `http://${HOST}:${PORT}`);
+      const boardQ = url.searchParams.get('board') || BOARD_PICK || null;
+      const html = await generate({ boardFilter: boardQ });
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Content-Length': Buffer.byteLength(html),
+        'Cache-Control': 'no-store',
+      });
+      if (req.method === 'HEAD') { res.end(); return; }
+      res.end(html);
+    } catch (err) {
+      const msg = err && err.message || String(err);
+      console.error(`[canvas-to-html] request error: ${msg}`);
+      if (isMcpDownError(msg)) {
+        const body = buildEmptyHtml(`The Penpot MCP plugin is not currently connected (${msg}).`);
+        res.writeHead(503, {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Content-Length': Buffer.byteLength(body),
+          'Cache-Control': 'no-store',
+        });
+        res.end(body);
+      } else {
+        const body = buildEmptyHtml(`Render failed: ${msg}`);
+        res.writeHead(500, {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Content-Length': Buffer.byteLength(body),
+          'Cache-Control': 'no-store',
+        });
+        res.end(body);
+      }
+    }
+  });
+
+  server.on('error', (err) => {
+    console.error(`[canvas-to-html] server error: ${err.message}`);
+  });
+
+  server.listen(PORT, HOST, () => {
+    console.log(`[canvas-to-html] listening on http://${HOST}:${PORT}`);
+    console.log(`[canvas-to-html] each request re-reads the Penpot canvas (MCP @ ${MCP_URL})`);
+  });
+
+  process.on('uncaughtException',  (err) => console.error('[canvas-to-html] uncaughtException:', err && err.stack || err));
+  process.on('unhandledRejection', (err) => console.error('[canvas-to-html] unhandledRejection:', err));
+}
+
+async function main() {
+  if (SERVE_MODE) {
+    startServer();
+    return;
+  }
+  const code = await runOnce();
+  process.exit(code);
+}
+
+main().catch(err => { console.error('[canvas-to-html] fatal:', err.message); process.exit(1); });
